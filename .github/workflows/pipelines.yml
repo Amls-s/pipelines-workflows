@@ -1,413 +1,87 @@
-name: Pipelines
-run-name: Run Gruntwork Pipelines
-on:
-  workflow_call:
-    inputs:
-      # This field can be overriden to customize the runner used for pipelines
-      # workflows.
-      #
-      # IMPORTANT: To use self-hosted runners this workflow must be hosted in
-      # the same GitHub organization as your infra-live repository.
-      # See https://docs.github.com/en/actions/using-workflows/reusing-workflows#using-self-hosted-runners
-      #
-      # The value must be an escaped JSON string that will be decoded to the
-      # jobs.runs-on field
-      # See https://docs.github.com/en/actions/using-workflows/workflow-syntax-for-github-actions#jobsjob_idruns-on
-      #
-      # For example:
-      # - A simple github runner: "\"ubuntu-22.04\""
-      # - A list of labels: "[\"self-hosted\", \"linux\"]"
-      # - A map: "{group: \"ubuntu-runners\", labels: \"ubuntu-20.04-16core\"}"
-      runner:
-        type: string
-        default: '"ubuntu-latest"'
-      api_base_url:
-        type: string
-        default: "https://api.prod.app.gruntwork.io/api/v1"
-      pipelines_binary_url:
-        type: string
-        default: ""
-        description: "Override where we fetch pipelines from, used for internal testing"
-      pipelines_cli_version:
-        type: string
-        default: "v0.59.0"
-        description: "For Gruntwork internal testing - the version of the pipelines CLI to use"
-      pipelines_actions_repo:
-        type: string
-        default: "gruntwork-io/pipelines-actions"
-        description: "Repository to fetch pipelines actions from (e.g. use your org/repo for self-hosted)"
-      pipelines_actions_ref:
-        type: string
-        default: "v4.12.0"
-        description: "For Gruntwork internal testing - the ref of the pipelines actions to use"
-      pipelines_credentials_repo:
-        type: string
-        default: "gruntwork-io/pipelines-credentials"
-        description: "Repository to fetch pipelines credentials from (e.g. use your org/repo for self-hosted)"
-      pipelines_credentials_ref:
-        type: string
-        default: "v2.0.0"
-        description: "For Gruntwork internal testing - the ref of the pipelines credentials to use"
+# Kenya Schools Data Pipeline
 
-    secrets:
-      PIPELINES_READ_TOKEN:
-        required: false
-      PIPELINES_GRUNTWORK_READ_TOKEN:
-        required: false
-      PIPELINES_CUSTOMER_ORG_READ_TOKEN:
-        required: false
-      PR_CREATE_TOKEN:
-        required: false
-      PIPELINES_PLAN_ENCRYPTION_KEY:
-        required: false
+A small pipeline to download, merge, deduplicate and export Kenyan schools datasets into CSV and GeoJSON formats.
 
-env:
-  PIPELINES_CLI_VERSION: ${{ inputs.pipelines_cli_version }}
-  PIPELINES_ACTIONS_REPO: ${{ inputs.pipelines_actions_repo }}
-  PIPELINES_ACTIONS_REF: ${{ inputs.pipelines_actions_ref }}
-  PIPELINES_CREDENTIALS_REPO: ${{ inputs.pipelines_credentials_repo }}
-  PIPELINES_CREDENTIALS_REF: ${{ inputs.pipelines_credentials_ref }}
+This repository contains:
+- `merge_kenya_schools.py` — main script that downloads sources, merges and cleans records, writes `kenya_schools_cleaned.csv` and `kenya_schools_cleaned.geojson`.
+- `requirements.txt` — Python dependencies (some optional / heavy geospatial packages may be omitted depending on your environment).
+- `kenya_schools_cleaned.csv` — example cleaned output (generated).
+- `kenya_schools_cleaned.geojson` — example GeoJSON output (generated).
 
-  # GitHub Actions tends to hit resource exhaustion and kill running jobs
-  # if we leave parallelism unbounded, so we set the max to 10 for a sane default.
-  TG_PARALLELISM: 10
+Quick start (local)
+1. Clone the repo and enter it:
+   ```bash
+   git clone https://github.com/Amls-s/arepo.git
+   cd arepo
+   ```
 
-jobs:
-  pipelines_orchestrate:
-    name: Detect Infrastructure Changes
-    runs-on: ${{ fromJSON(inputs.runner) }}
-    env:
-      JOB_NAME: "Detect Infrastructure Changes"
-    steps:
-      - name: Record workflow env vars
-        env:
-          PIPELINES_BINARY_URL: ${{ inputs.pipelines_binary_url }}
-        run: |
-          time_now=$(date -u +"%s")
-          echo "PIPELINES_JOB_START_TIME=$time_now" >> $GITHUB_ENV
-          echo "PIPELINES_BINARY_URL=$PIPELINES_BINARY_URL" >> $GITHUB_ENV
+2. Create and activate a virtual environment:
+   ```bash
+   python3 -m venv .venv
+   source .venv/bin/activate
+   ```
 
-      - name: Checkout Pipelines Credentials
-        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
-        with:
-          path: pipelines-credentials
-          repository: ${{ env.PIPELINES_CREDENTIALS_REPO }}
-          ref: ${{ env.PIPELINES_CREDENTIALS_REF }}
+3. (Optional) If your network or system has trouble installing compiled geospatial packages, remove them from `requirements.txt` before installing:
+   ```bash
+   # view requirements
+   sed -n '1,200p' requirements.txt
 
-      - name: Fetch Pipeline Tokens
-        id: pipelines-tokens
-        uses: ./pipelines-credentials
-        env:
-          PIPELINES_GRUNTWORK_READ_TOKEN: ${{ secrets.PIPELINES_GRUNTWORK_READ_TOKEN || secrets.PIPELINES_READ_TOKEN }}
-          PIPELINES_CUSTOMER_ORG_READ_TOKEN: ${{ secrets.PIPELINES_CUSTOMER_ORG_READ_TOKEN || secrets.PIPELINES_READ_TOKEN }}
-          PR_CREATE_TOKEN: ${{ secrets.PR_CREATE_TOKEN }}
-        with:
-          token_requests: |
-            [
-              {"name": "gruntwork_read", "path": "pipelines-read/gruntwork-io", "fallback_env": "PIPELINES_GRUNTWORK_READ_TOKEN"},
-              {"name": "customer_org_read", "path": "pipelines-read/${{ github.repository_owner }}", "fallback_env": "PIPELINES_CUSTOMER_ORG_READ_TOKEN"},
-              {"name": "propose_infra_change", "path": "propose-infra-change/${{ github.repository_owner }}", "fallback_env": "PR_CREATE_TOKEN"}
-            ]
-          api_base_url: ${{ inputs.api_base_url }}
+   # remove geopandas/shapely lines if necessary
+   sed -i '/geopandas/d; /shapely/d' requirements.txt
+   ```
 
-      - name: Checkout Pipelines Actions
-        id: checkout_actions
-        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
-        with:
-          path: pipelines-actions
-          repository: ${{ env.PIPELINES_ACTIONS_REPO }}
-          ref: ${{ env.PIPELINES_ACTIONS_REF }}
-          token: ${{ env.PIPELINES_ACTIONS_REPO == 'gruntwork-io/pipelines-actions' && fromJson(steps.pipelines-tokens.outputs.tokens_json).gruntwork_read || fromJson(steps.pipelines-tokens.outputs.tokens_json).customer_org_read }}
+4. Install dependencies:
+   ```bash
+   python3 -m pip install --upgrade pip
+   python3 -m pip install -r requirements.txt
+   ```
 
-      - name: Report error if token with access to gruntwork repos is invalid
-        if: always() && steps.pipelines-tokens.conclusion == 'success' && steps.checkout_actions.conclusion != 'success'
-        env:
-          GH_TOKEN: ${{ github.token }}
-          GITHUB_ORG: ${{ github.repository }}
-          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-        shell: bash
-        run: |
-          logs_url="https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
-          msg=$(printf "<h2>❌ Plan for $PR_HEAD_SHA</h2>❌ Gruntwork Pipelines was unable to checkout the <code>pipelines-actions</code> repository. Please ensure the <code>PIPELINES_READ_TOKEN</code> is valid and unexpired. <a href=\"https://docs.gruntwork.io/pipelines/security/machine-users#ci-read-only-user\">Learn More</a><br><br><br><a href=\"$logs_url\">View full logs</a>")
-          echo "::error:: $msg" # Results in step failure but rest of logic in this step will still run
-          echo "$msg" >> "$GITHUB_STEP_SUMMARY"
-          pull_number=$(jq --raw-output .pull_request.number "$GITHUB_EVENT_PATH")
-          gh pr comment $pull_number -b "$msg" -R $GITHUB_ORG || true # || true incase this fails on a non-PR run
+5. Run the pipeline:
+   ```bash
+   python3 merge_kenya_schools.py
+   ```
 
-      - name: Check out repo code
-        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
-        with:
-          path: infra-live-repo
-          fetch-depth: 0
-          token: ${{ fromJson(steps.pipelines-tokens.outputs.tokens_json).customer_org_read }}
+Outputs
+- `kenya_schools_cleaned.csv` — cleaned table (includes header).
+- `kenya_schools_cleaned.geojson` — GeoJSON produced via geopandas (if geopandas was available).
 
-      - name: Install Pipelines CLI
-        uses: ./pipelines-actions/.github/actions/pipelines-install
-        with:
-          version: ${{ env.PIPELINES_CLI_VERSION }}
-          PIPELINES_GRUNTWORK_READ_TOKEN: ${{ fromJson(steps.pipelines-tokens.outputs.tokens_json).gruntwork_read }}
+Notes and troubleshooting
+- If pip fails to download packages due to network/DNS issues, try:
+  ```bash
+  python3 -m pip install --default-timeout=60 --retries=5 --trusted-host pypi.org --trusted-host files.pythonhosted.org -r requirements.txt
+  ```
+  Or install core packages from your OS (e.g., `sudo apt install python3-pandas python3-requests`) and remove heavy geospatial deps temporarily.
+- If `merge_kenya_schools.py` errors with pandas groupby AttributeError referencing `.items()`, ensure the loop iterates over the GroupBy directly:
+  ```py
+  for county, group in all_df.groupby(all_df["county"].fillna("")):
+      ...
+  ```
+- Some sources occasionally return 0 rows; the script will continue if one or more sources are missing, but check source URLs in `merge_kenya_schools.py` if you expect data.
 
-      - name: Configure code auth
-        uses: ./pipelines-actions/.github/actions/pipelines-code-auth
-        with:
-          PIPELINES_GRUNTWORK_READ_TOKEN: ${{ fromJson(steps.pipelines-tokens.outputs.tokens_json).gruntwork_read }}
-          PIPELINES_CUSTOMER_ORG_READ_TOKEN: ${{ fromJson(steps.pipelines-tokens.outputs.tokens_json).customer_org_read }}
+Committing large files
+- The current outputs are small (<50 MB) and can be committed normally.
+- If you add very large data files in future, consider using Git LFS:
+  ```bash
+  sudo apt update
+  sudo apt install -y git-lfs
+  git lfs install
+  git lfs track "*.csv"
+  git lfs track "*.geojson"
+  git add .gitattributes
+  ```
 
-      - name: Preflight Checks
-        id: preflight
-        uses: ./pipelines-actions/.github/actions/pipelines-preflight-action
-        with:
-          PIPELINES_READ_TOKEN: ${{ secrets.PIPELINES_READ_TOKEN }}
-          PIPELINES_GRUNTWORK_READ_TOKEN: ${{ fromJson(steps.pipelines-tokens.outputs.tokens_json).gruntwork_read }}
-          PIPELINES_CUSTOMER_ORG_READ_TOKEN: ${{ fromJson(steps.pipelines-tokens.outputs.tokens_json).customer_org_read }}
-          PR_COMMENT_WRITE_TOKEN: ${{ fromJson(steps.pipelines-tokens.outputs.tokens_json).propose_infra_change }}
-          PIPELINES_PLAN_ENCRYPTION_KEY: ${{ secrets.PIPELINES_PLAN_ENCRYPTION_KEY }}
-          # Raw customer-set fallback secrets, validated by preflight as warnings
-          # so an expired fallback is surfaced proactively rather than only when the
-          # GitHub App is unavailable.
-          PIPELINES_READ_TOKEN_FALLBACK: ${{ secrets.PIPELINES_READ_TOKEN }}
-          PIPELINES_GRUNTWORK_READ_TOKEN_FALLBACK: ${{ secrets.PIPELINES_GRUNTWORK_READ_TOKEN }}
-          PIPELINES_CUSTOMER_ORG_READ_TOKEN_FALLBACK: ${{ secrets.PIPELINES_CUSTOMER_ORG_READ_TOKEN }}
-          PR_CREATE_TOKEN_FALLBACK: ${{ secrets.PR_CREATE_TOKEN }}
+Contributing
+- To contribute, create a feature branch, make changes, commit and push, and open a pull request:
+  ```bash
+  git checkout -b my-feature
+  git add <files>
+  git commit -m "Describe changes"
+  git push -u origin my-feature
+  ```
+- For simple instructions on running the pipeline, edit `CONTRIBUTING.md` or open an issue describing improvements.
 
-      - name: Pipelines Orchestrate
-        id: orchestrate
-        uses: ./pipelines-actions/.github/actions/pipelines-orchestrate
-        with:
-          API_BASE_URL: ${{ inputs.api_base_url }}
-          PIPELINES_GRUNTWORK_READ_TOKEN: ${{ fromJson(steps.pipelines-tokens.outputs.tokens_json).gruntwork_read }}
-          PIPELINES_CUSTOMER_ORG_READ_TOKEN: ${{ fromJson(steps.pipelines-tokens.outputs.tokens_json).customer_org_read }}
-          PR_COMMENT_WRITE_TOKEN: ${{ fromJson(steps.pipelines-tokens.outputs.tokens_json).propose_infra_change }}
-          preflight_output_file: ${{ steps.preflight.outputs.preflight_output_file }}
+License
+- Include or replace with your chosen license file (e.g. `LICENSE`).
 
-    outputs:
-      pipelines_jobs: ${{ steps.orchestrate.outputs.jobs }}
-
-  pipelines_execute:
-    env:
-      JOB_NAME: ${{ contains(matrix.jobs.Action.Command, 'plan') && 'Plan' || 'Apply' }} - ${{ matrix.jobs.ChangeType }} - ${{ matrix.jobs.WorkingDirectory }}
-    name: ${{ contains(matrix.jobs.Action.Command, 'plan') && 'Plan' || 'Apply' }} - ${{ matrix.jobs.ChangeType }} - ${{ matrix.jobs.WorkingDirectory }}
-    needs: [pipelines_orchestrate]
-    runs-on: ${{ fromJSON(inputs.runner) }}
-    # GHA can't check for length, so we just check if there is an item in the 0 index
-    if: fromJson(needs.pipelines_orchestrate.outputs.pipelines_jobs)[0] != null
-    strategy:
-      fail-fast: false
-      matrix:
-        jobs: ${{ fromJson(needs.pipelines_orchestrate.outputs.pipelines_jobs) }}
-    steps:
-      - name: Record workflow env vars
-        env:
-          PIPELINES_BINARY_URL: ${{ inputs.pipelines_binary_url }}
-        run: |
-          time_now=$(date -u +"%s")
-          echo "PIPELINES_JOB_START_TIME=$time_now" >> $GITHUB_ENV
-          echo "PIPELINES_BINARY_URL=$PIPELINES_BINARY_URL" >> $GITHUB_ENV
-
-      - name: Checkout Pipelines Credentials
-        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
-        with:
-          path: pipelines-credentials
-          repository: ${{ env.PIPELINES_CREDENTIALS_REPO }}
-          ref: ${{ env.PIPELINES_CREDENTIALS_REF }}
-
-      - name: Fetch Pipeline Tokens
-        id: pipelines-tokens
-        uses: ./pipelines-credentials
-        env:
-          PIPELINES_GRUNTWORK_READ_TOKEN: ${{ secrets.PIPELINES_GRUNTWORK_READ_TOKEN || secrets.PIPELINES_READ_TOKEN }}
-          PIPELINES_CUSTOMER_ORG_READ_TOKEN: ${{ secrets.PIPELINES_CUSTOMER_ORG_READ_TOKEN || secrets.PIPELINES_READ_TOKEN }}
-          PR_CREATE_TOKEN: ${{ secrets.PR_CREATE_TOKEN }}
-        with:
-          token_requests: |
-            [
-              {"name": "gruntwork_read", "path": "pipelines-read/gruntwork-io", "fallback_env": "PIPELINES_GRUNTWORK_READ_TOKEN"},
-              {"name": "customer_org_read", "path": "pipelines-read/${{ github.repository_owner }}", "fallback_env": "PIPELINES_CUSTOMER_ORG_READ_TOKEN"},
-              {"name": "propose_infra_change", "path": "propose-infra-change/${{ github.repository_owner }}", "fallback_env": "PR_CREATE_TOKEN"}
-            ]
-          api_base_url: ${{ inputs.api_base_url }}
-
-      - name: Checkout Pipelines Actions
-        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
-        with:
-          path: pipelines-actions
-          repository: ${{ env.PIPELINES_ACTIONS_REPO }}
-          ref: ${{ env.PIPELINES_ACTIONS_REF }}
-          token: ${{ env.PIPELINES_ACTIONS_REPO == 'gruntwork-io/pipelines-actions' && fromJson(steps.pipelines-tokens.outputs.tokens_json).gruntwork_read || fromJson(steps.pipelines-tokens.outputs.tokens_json).customer_org_read }}
-
-      - name: Check out repo code
-        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
-        with:
-          path: infra-live-repo
-          fetch-depth: 0
-          token: ${{ fromJson(steps.pipelines-tokens.outputs.tokens_json).customer_org_read }}
-
-      - name: Install Pipelines CLI
-        uses: ./pipelines-actions/.github/actions/pipelines-install
-        with:
-          version: ${{ env.PIPELINES_CLI_VERSION }}
-          PIPELINES_GRUNTWORK_READ_TOKEN: ${{ fromJson(steps.pipelines-tokens.outputs.tokens_json).gruntwork_read }}
-
-      - name: Install Mise
-        id: mise-toml
-        uses: jdx/mise-action@1648a7812b9aeae629881980618f079932869151 # v4.0.1
-        with:
-          install: true
-          cache: true
-          version: 2026.4.11
-          working_directory: "./infra-live-repo"
-
-      - name: Configure code auth
-        uses: ./pipelines-actions/.github/actions/pipelines-code-auth
-        with:
-          PIPELINES_GRUNTWORK_READ_TOKEN: ${{ fromJson(steps.pipelines-tokens.outputs.tokens_json).gruntwork_read }}
-          PIPELINES_CUSTOMER_ORG_READ_TOKEN: ${{ fromJson(steps.pipelines-tokens.outputs.tokens_json).customer_org_read }}
-
-      - name: "[TerragruntExecute]: Run terragrunt ${{ matrix.jobs.Action.Command }} in ${{ matrix.jobs.WorkingDirectory }}"
-        id: terragrunt
-        uses: ./pipelines-actions/.github/actions/pipelines-execute
-        env:
-          CHANGE_TYPE: ${{ matrix.jobs.ChangeType }}
-        with:
-          PIPELINES_GRUNTWORK_READ_TOKEN: ${{ fromJson(steps.pipelines-tokens.outputs.tokens_json).gruntwork_read }}
-          PIPELINES_CUSTOMER_ORG_READ_TOKEN: ${{ fromJson(steps.pipelines-tokens.outputs.tokens_json).customer_org_read }}
-          working_directory: ${{ matrix.jobs.WorkingDirectory }}
-          terragrunt_command: ${{ matrix.jobs.Action.Command }} ${{ matrix.jobs.Action.Args }}
-          ref: ${{ matrix.jobs.Ref }}
-          stack_paths: ${{ toJson(matrix.jobs.StackPaths) }}
-
-      - name: Update comment
-        if: always()
-        uses: ./pipelines-actions/.github/actions/pipelines-comment-job-update
-        with:
-          PR_COMMENT_WRITE_TOKEN: ${{ fromJson(steps.pipelines-tokens.outputs.tokens_json).propose_infra_change }}
-          PIPELINES_PLAN_ENCRYPTION_KEY: ${{ secrets.PIPELINES_PLAN_ENCRYPTION_KEY }}
-          step_name: ${{ matrix.jobs.ChangeType }}
-          step_working_directory: ${{ matrix.jobs.WorkingDirectory }}
-          step_terragrunt_command: ${{ matrix.jobs.Action.Command }} ${{ matrix.jobs.Action.Args }}
-          step_status: ${{ steps.terragrunt.conclusion == 'success' && 'success' || 'failure' }}
-          plan_apply_log_file_path: ${{ steps.terragrunt.outputs.plan_folder }}
-          extended_log_file_path: ${{ steps.terragrunt.outputs.execute_stdout_log }}
-          pipelines_report_file_path: ${{ steps.terragrunt.outputs.pipelines_report_file_path }}
-          job_name: ${{ env.JOB_NAME }}
-
-    outputs:
-      account_id: ${{ matrix.jobs.AccountId }}
-      branch: ${{ matrix.jobs.Ref }}
-      working_directory: ${{ matrix.jobs.WorkingDirectory }}
-      terragrunt_command: ${{ matrix.jobs.Action.Command }} ${{ matrix.jobs.Action.Args }}
-      additional_data: ${{ toJson(matrix.jobs.AdditionalData) }}
-      child_account_id: ${{ matrix.jobs.AdditionalData.ChildAccountId }}
-
-  pipelines_status_check:
-    name: "Pipelines Status Check"
-    runs-on: ${{ fromJSON(inputs.runner) }}
-    needs: [pipelines_orchestrate, pipelines_execute]
-    if: always()
-    steps:
-      - name: Record workflow env vars
-        env:
-          PIPELINES_BINARY_URL: ${{ inputs.pipelines_binary_url }}
-        run: |
-          time_now=$(date -u +"%s")
-          echo "PIPELINES_JOB_START_TIME=$time_now" >> $GITHUB_ENV
-          echo "PIPELINES_BINARY_URL=$PIPELINES_BINARY_URL" >> $GITHUB_ENV
-
-      - name: Checkout Pipelines Credentials
-        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
-        with:
-          path: pipelines-credentials
-          repository: ${{ env.PIPELINES_CREDENTIALS_REPO }}
-          ref: ${{ env.PIPELINES_CREDENTIALS_REF }}
-
-      - name: Fetch Pipeline Tokens
-        id: pipelines-tokens
-        uses: ./pipelines-credentials
-        env:
-          PIPELINES_GRUNTWORK_READ_TOKEN: ${{ secrets.PIPELINES_GRUNTWORK_READ_TOKEN || secrets.PIPELINES_READ_TOKEN }}
-          PIPELINES_CUSTOMER_ORG_READ_TOKEN: ${{ secrets.PIPELINES_CUSTOMER_ORG_READ_TOKEN || secrets.PIPELINES_READ_TOKEN }}
-          PR_CREATE_TOKEN: ${{ secrets.PR_CREATE_TOKEN }}
-        with:
-          token_requests: |
-            [
-              {"name": "gruntwork_read", "path": "pipelines-read/gruntwork-io", "fallback_env": "PIPELINES_GRUNTWORK_READ_TOKEN"},
-              {"name": "customer_org_read", "path": "pipelines-read/${{ github.repository_owner }}", "fallback_env": "PIPELINES_CUSTOMER_ORG_READ_TOKEN"},
-              {"name": "propose_infra_change", "path": "propose-infra-change/${{ github.repository_owner }}", "fallback_env": "PR_CREATE_TOKEN"}
-            ]
-          api_base_url: ${{ inputs.api_base_url }}
-
-      - name: Checkout Pipelines Actions
-        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
-        with:
-          path: pipelines-actions
-          repository: ${{ env.PIPELINES_ACTIONS_REPO }}
-          ref: ${{ env.PIPELINES_ACTIONS_REF }}
-          token: ${{ env.PIPELINES_ACTIONS_REPO == 'gruntwork-io/pipelines-actions' && fromJson(steps.pipelines-tokens.outputs.tokens_json).gruntwork_read || fromJson(steps.pipelines-tokens.outputs.tokens_json).customer_org_read }}
-
-      - name: Check out repo code
-        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
-        with:
-          path: infra-live-repo
-          token: ${{ fromJson(steps.pipelines-tokens.outputs.tokens_json).customer_org_read }}
-
-      - name: Install Pipelines CLI
-        uses: ./pipelines-actions/.github/actions/pipelines-install
-        with:
-          version: ${{ env.PIPELINES_CLI_VERSION }}
-          PIPELINES_GRUNTWORK_READ_TOKEN: ${{ fromJson(steps.pipelines-tokens.outputs.tokens_json).gruntwork_read }}
-
-      - name: Install Mise
-        id: mise-toml
-        uses: jdx/mise-action@1648a7812b9aeae629881980618f079932869151 # v4.0.1
-        with:
-          install: true
-          cache: true
-          version: 2026.4.11
-          working_directory: "./infra-live-repo"
-
-      - name: Configure code auth
-        uses: ./pipelines-actions/.github/actions/pipelines-code-auth
-        with:
-          PIPELINES_GRUNTWORK_READ_TOKEN: ${{ fromJson(steps.pipelines-tokens.outputs.tokens_json).gruntwork_read }}
-          PIPELINES_CUSTOMER_ORG_READ_TOKEN: ${{ fromJson(steps.pipelines-tokens.outputs.tokens_json).customer_org_read }}
-
-      - name: Pipelines After Hooks
-        id: hooks_after
-        uses: ./pipelines-actions/.github/actions/pipelines-hooks-after
-        with:
-          GH_TOKEN: ${{ fromJson(steps.pipelines-tokens.outputs.tokens_json).customer_org_read }}
-          GH_ARTIFACT_TOKEN: ${{ fromJson(steps.pipelines-tokens.outputs.tokens_json).customer_org_read }}
-          PIPELINES_PLAN_ENCRYPTION_KEY: ${{ secrets.PIPELINES_PLAN_ENCRYPTION_KEY }}
-          PIPELINES_GRUNTWORK_READ_TOKEN: ${{ fromJson(steps.pipelines-tokens.outputs.tokens_json).gruntwork_read }}
-
-      - name: Check Status
-        if: always()
-        shell: bash
-        working-directory: ./infra-live-repo
-        env:
-          API_BASE_URL: ${{ inputs.api_base_url }}
-          GH_TOKEN: ${{ fromJson(steps.pipelines-tokens.outputs.tokens_json).propose_infra_change }}
-          GH_ARTIFACT_TOKEN: ${{ fromJson(steps.pipelines-tokens.outputs.tokens_json).propose_infra_change }}
-          AFTER_HOOKS_OUTPUT_FILE: ${{ steps.hooks_after.outputs.output_file }}
-          AFTER_HOOKS_OUTCOME: ${{ steps.hooks_after.outcome }}
-        run: |
-          pipelines status-update finalize \
-            --working-directory . \
-            --after-hooks-output-file "$AFTER_HOOKS_OUTPUT_FILE" \
-            --ci github-actions >/tmp/finalize-output.json
-
-          pipelines inventory usage --working-directory . || true
-
-          pipeline_status=$(jq -r '.status' </tmp/finalize-output.json)
-
-          cat /tmp/finalize-output.json
-
-          printf '%.s─' $(seq 1 "$(tput -T dumb cols)")
-          echo " "
-          if [[ "$AFTER_HOOKS_OUTCOME" != "failure" && "$pipeline_status" == "success" ]]; then
-            echo -e "✅ \033[1;32mPipeline Passed\033[0m"
-            exit 0
-          else
-            echo -e "❌ \033[1;31mPipeline Failed\033[0m"
-            exit 1
-          fi
+Questions / support
+- If you run into problems running the script, paste the terminal output (first ~50 lines) into a new issue and include your OS and Python version.
